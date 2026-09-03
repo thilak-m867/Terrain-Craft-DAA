@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TerrainCraft Research Laboratory</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 flex flex-col h-screen overflow-hidden text-xs select-none">
+
+  <!-- Header -->
+  <header class="h-12 border-b border-slate-800 bg-slate-900/90 px-6 flex items-center justify-between z-20">
+    <div class="flex items-center space-x-3">
+      <span class="text-emerald-400 font-bold text-sm tracking-widest">TERRAINCRAFT</span>
+      <span class="bg-slate-800 text-slate-300 border border-slate-700 px-2 py-0.5 rounded font-mono">D&C Delaunay + Spatial k-d Tree</span>
+    </div>
+    <div class="flex items-center space-x-6 font-mono">
+      <span>Vertices: <b id="m-pts" class="text-white">-</b></span>
+      <span>Triangles: <b id="m-tri" class="text-white">-</b></span>
+      <span>D&C Time: <b id="m-lat" class="text-emerald-400">- ms</b></span>
+      <span>k-d Tree Build: <b id="m-kd-lat" class="text-cyan-400">- ms</b></span>
+    </div>
+  </header>
+
+  <!-- Main View -->
+  <div class="flex-1 flex overflow-hidden">
+    
+    <!-- Controls & Analytics Sidebar -->
+    <aside class="w-96 bg-slate-900/80 border-r border-slate-800 p-4 flex flex-col gap-3.5 overflow-y-auto z-10 backdrop-blur">
+      
+      <!-- Module 1: Ingestion -->
+      <div>
+        <label class="font-bold uppercase text-slate-400 block mb-1.5">1. Terrain Generator / Ingestion</label>
+        <select id="sel-preset" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-slate-200 focus:outline-none focus:border-emerald-500 mb-2">
+          <option value="alpine">Alpine Glacial Formations</option>
+          <option value="volcano">Stratovolcano Caldera</option>
+          <option value="faultline">Tectonic Faultline Ridge</option>
+        </select>
+        
+        <label class="w-full flex items-center justify-center p-2 bg-slate-800/60 border border-dashed border-slate-700 rounded hover:border-emerald-500 cursor-pointer transition">
+          <span class="text-[11px] text-slate-400">Upload LiDAR/DEM (.xyz, .csv)</span>
+          <input type="file" id="file-upload" accept=".csv,.xyz,.txt" class="hidden">
+        </label>
+      </div>
+
+      <!-- Resolution Slider -->
+      <div>
+        <div class="flex justify-between font-mono mb-1">
+          <span class="text-slate-400">Point Resolution (N)</span>
+          <span id="lbl-n" class="text-emerald-400">1000</span>
+        </div>
+        <input type="range" id="rng-n" min="200" max="4000" step="200" value="1000" class="w-full accent-emerald-500 cursor-pointer">
+      </div>
+
+      <button id="btn-run" class="w-full bg-emerald-600 hover:bg-emerald-500 py-2.5 rounded font-bold transition shadow-lg shadow-emerald-950">
+        Execute D&C Triangulation
+      </button>
+
+      <!-- Module 3: Proximity Probe Readout -->
+      <div class="border-t border-slate-800 pt-3">
+        <label class="font-bold uppercase text-cyan-400 block mb-1">2. Interactive Spatial Proximity Probe</label>
+        <p class="text-[11px] text-slate-400 mb-2">Click anywhere on the 3D surface to execute a real-time NN query.</p>
+        <div class="bg-slate-950 p-2.5 rounded border border-slate-800 font-mono space-y-1">
+          <div class="flex justify-between">
+            <span class="text-slate-400">Target (X, Y):</span>
+            <span id="lbl-probe-xy" class="text-slate-200">Click on terrain</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">k-d Tree Query Latency:</span>
+            <span id="lbl-probe-lat" class="text-cyan-400 font-bold">- µs</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Module 4: Complexity Chart -->
+      <div class="border-t border-slate-800 pt-2">
+        <label class="font-bold uppercase text-slate-400 block mb-1.5">3. Empirical Complexity Benchmark</label>
+        <div class="bg-slate-950 p-2 rounded border border-slate-800 h-36">
+          <canvas id="benchmarkChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Mesh Health -->
+      <div class="border-t border-slate-800 pt-2 font-mono space-y-1">
+        <div class="flex justify-between bg-slate-950 p-1.5 rounded border border-slate-800">
+          <span class="text-slate-400">Mean Min Angle (θ):</span>
+          <span id="m-worst-theta" class="text-emerald-400">-°</span>
+        </div>
+        <div class="flex justify-between bg-slate-950 p-1.5 rounded border border-slate-800">
+          <span class="text-slate-400">Sliver Triangles:</span>
+          <span id="m-sliver" class="text-emerald-400">-%</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 3D Canvas -->
+    <main id="viewport" class="flex-1 h-full bg-slate-950 relative cursor-crosshair"></main>
+  </div>
+
+  <script>
+    const container = document.getElementById('viewport');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x020617);
+
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 1, 2000);
+    camera.position.set(0, -180, 140);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const dLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dLight.position.set(50, -50, 150);
+    scene.add(dLight);
+
+    let terrainMesh = null;
+    let queryGroup = new THREE.Group();
+    scene.add(queryGroup);
+    let chart = null;
+
+    function initChart(data) {
+      const ctx = document.getElementById('benchmarkChart').getContext('2d');
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: data.sizes,
+          datasets: [
+            { label: 'D&C O(N log N)', data: data.dnc_ms, borderColor: '#10b981', tension: 0.2 },
+            { label: 'Naive O(N²)', data: data.naive_ms, borderColor: '#ef4444', borderDash: [4, 4], tension: 0.2 }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: '#94a3b8', font: { size: 9 } } } },
+          scales: {
+            x: { ticks: { color: '#64748b' } },
+            y: { ticks: { color: '#64748b' } }
+          }
+        }
+      });
+    }
+
+    async function execute() {
+      const n = document.getElementById('rng-n').value;
+      const preset = document.getElementById('sel-preset').value;
+      const res = await fetch(`/api/triangulate/generate?n_points=${n}&complexity=${preset}`);
+      const data = await res.json();
+      updateDashboard(data);
+    }
+
+    function updateDashboard(data) {
+      document.getElementById('m-pts').innerText = data.metrics.n_points;
+      document.getElementById('m-tri').innerText = data.metrics.n_faces;
+      document.getElementById('m-lat').innerText = `${data.metrics.dnc_latency_ms} ms`;
+      document.getElementById('m-kd-lat').innerText = `${data.metrics.kdtree_build_ms} ms`;
+      document.getElementById('m-sliver').innerText = `${data.metrics.health.sliver_percentage.toFixed(1)}%`;
+      document.getElementById('m-worst-theta').innerText = `${data.metrics.health.mean_min_angle.toFixed(1)}°`;
+
+      render3D(data.vertices, data.faces);
+    }
+
+    function render3D(verts, faces) {
+      if (terrainMesh) scene.remove(terrainMesh);
+      queryGroup.clear();
+
+      const geom = new THREE.BufferGeometry();
+      const pos = [], colors = [];
+      const cLow = new THREE.Color(0x0284c7), cMid = new THREE.Color(0x10b981), cHigh = new THREE.Color(0xf8fafc);
+
+      faces.forEach(f => {
+        f.forEach(idx => {
+          const [x, y, z] = verts[idx];
+          pos.push(x, y, z);
+          const t = THREE.MathUtils.clamp((z + 20) / 55, 0, 1);
+          const c = t < 0.5 ? cLow.clone().lerp(cMid, t * 2) : cMid.clone().lerp(cHigh, (t - 0.5) * 2);
+          colors.push(c.r, c.g, c.b);
+        });
+      });
+
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      geom.computeVertexNormals();
+
+      terrainMesh = new THREE.Mesh(geom, new THREE.MeshLambertMaterial({ 
+        vertexColors: true, 
+        side: THREE.DoubleSide 
+      }));
+      scene.add(terrainMesh);
+    }
+
+    // --- Interactive k-d Tree Proximity Probe on Click ---
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    container.addEventListener('pointerdown', async (e) => {
+      if (e.button !== 0 || !terrainMesh) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObject(terrainMesh);
+
+      if (hits.length > 0) {
+        const p = hits[0].point;
+        document.getElementById('lbl-probe-xy').innerText = `(${p.x.toFixed(1)}, ${p.y.toFixed(1)})`;
+
+        const res = await fetch(`/api/nearest?x=${p.x}&y=${p.y}&k=6`);
+        const data = await res.json();
+        document.getElementById('lbl-probe-lat').innerText = `${data.latency_us} µs`;
+
+        highlightKNN(p, data.neighbors);
+      }
+    });
+
+    function highlightKNN(hitPoint, neighbors) {
+      queryGroup.clear();
+
+      // Red Target Pin
+      const pin = new THREE.Mesh(
+        new THREE.SphereGeometry(1.4, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xff0055 })
+      );
+      pin.position.copy(hitPoint);
+      queryGroup.add(pin);
+
+      // Cyan Vector Links
+      neighbors.forEach(n => {
+        const [nx, ny, nz] = n.point;
+        const pts = [hitPoint, new THREE.Vector3(nx, ny, nz)];
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(pts),
+          new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2 })
+        );
+        queryGroup.add(line);
+
+        // Highlight Neighbor Node
+        const nNode = new THREE.Mesh(
+          new THREE.SphereGeometry(0.8, 12, 12),
+          new THREE.MeshBasicMaterial({ color: 0x00ffff })
+        );
+        nNode.position.set(nx, ny, nz);
+        queryGroup.add(nNode);
+      });
+    }
+
+    // --- File Upload Handler ---
+    document.getElementById('file-upload').onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/triangulate/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!data.error) updateDashboard(data);
+    };
+
+    document.getElementById('rng-n').oninput = (e) => document.getElementById('lbl-n').innerText = e.target.value;
+    document.getElementById('btn-run').onclick = execute;
+    document.getElementById('sel-preset').onchange = execute;
+
+    fetch('/api/benchmark').then(r => r.json()).then(initChart);
+    execute();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    function loop() {
+      requestAnimationFrame(loop);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    loop();
+  </script>
+</body>
+</html>
